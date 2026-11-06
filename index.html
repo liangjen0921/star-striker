@@ -218,6 +218,7 @@ var boss=null,slowmo=1,slowT=0;
 var score=0,wave=0,spawnLeft=0,betweenWaves=false,waveTimer=0,spawnTimer=0;
 var shake=0,flash=0,clearT=0,overT=0,menuT=0,shotN=0;
 var banner={main:'',sub:'',t:0,dur:1,color:'#ffffff'};
+var bossWarn=0,warnBeep=0;               /* 批次5:BOSS 出場前的紅色閃爍警示倒數(秒) */
 var best=0;
 try{best=parseInt(localStorage.getItem('starstriker.bestMobile')||'0',10)||0;}catch(e){best=0;}
 var DRONE_CAP=15,SPREAD_CAP=20,BOSS_SHIELD=true;
@@ -235,10 +236,29 @@ var SINGLE_GAP=1.25;       /* 零散出怪間隔倍率(原 0.7~1.3) */
 var DRONE_DMG=0.15;        /* 無人機傷害 = 玩家攻擊力 * 此值(原 0.20) */
 var FOE_SHAKE=0.16;        /* 敵機(含大型)爆炸的畫面震動強度(原 size*0.5) */
 var AOE_SHAKE=0.06;        /* 電漿/飛彈命中爆炸的畫面震動強度(原 size*0.5) */
+var shakeMute=0;           /* 批次8:暫存旗標=1 時 boom() 不加震動(只用在電漿命中/炸小怪的區塊) */
+var PLASMA_FOE_SHAKE=0;    /* 批次8:電漿對非 BOSS 敵機(含大怪)的震動強度,0=完全不震 */
+/* ---- 批次7:全屏白閃只留大型敵機/BOSS/玩家技能,小怪與 AOE 爆炸改局部特效 ---- */
+var FLASH_MIN_SIZE=24;     /* 批次7:FOES 表基礎半徑 < 此值(grunt19/zig18/shooter21/diver16/mini14)死亡 → 不推全屏閃爍;tank31/bomber25/splitter26 保留 */
+var FLASH_SHOT=0;          /* 電漿/飛彈 AOE 爆炸對全屏閃爍的額外貢獻(0=完全不閃) */
+var GLOW_SHOT=0.34;        /* AOE 命中點局部光球半徑 = aoe * 此值 */
 var WAVE_HP=0.075;         /* 每波小怪血量增量(原 0.055) */
 var KILL_HP=1.18;          /* 每擊殺一波 BOSS 小怪血量倍率(原 1.16) */
 var BOSS_HP0=160,BOSS_HP1=120,BOSS_HP2=20;  /* BOSS 基礎血量(原 120/100/16) */
 var HPS_UP=0.20,HPS_LV=0.12;    /* BOSS 血量隨玩家強化成長(原 0.16/0.10) */
+/* ---- 批次6:後期壓力(第 15 波之後不能變成無雙) ---- */
+var LATE_FROM=15;              /* 從第幾波開始追加後期係數 */
+var LATE_HP=0.045;             /* 第 15 波之後每波再 +4.5% 小怪血量 */
+var LATE_SPD=0.012;            /* 後期敵機額外速度成長 */
+var LATE_FIRE=0.02;            /* 後期敵機開火間隔每波再縮 2% */
+var LATE_FIRE_MUL=0.72;        /* 開火間隔最多縮到 72% */
+var LATE_DROP=0.02;            /* 後期掉落率每波再降 2% */
+var LATE_DROP_MIN=0.55;        /* 掉落率最多降到 55% */
+var LATE_UP=0.03;              /* rapid/dmg 的掉落權重後期每波降 3% */
+var LATE_UP_MIN=0.45;          /* 上述權重下限 */
+var RAPID_EFF=6;               /* 射速強化有效等級上限(再多只增加手感不實心) */
+var DMG_SOFT=6;                /* 傷害強化前 6 級照舊,之後每級 +6% */
+var DMG_SOFT_MUL=1.06;
 var foesForm=0,foesSingle=0;    /* 統計:來自編隊的敵機數 / 零散出怪數 */
 /* ---- 手機版結構參數(批次1:只定義,套用在其他批次) ---- */
 var MO_W=420,MO_H=900;               /* 畫布內部解析度(直式 1:2.14) */
@@ -273,12 +293,34 @@ var MO_BOMB_DMG=4;                   /* 炸彈對敵機的傷害(手機版新增
 var MO_BOMB_BOSS=0.06;               /* 炸彈對 BOSS 的最大血量比例傷害 */
 var MO_BOMB_INV=1.0;                 /* 炸彈爆發後給的無敵秒數 */
 var MO_FINGER_STEP=10;               /* 暫停選單「手指偏移」每按一次的增量 */
+var MO_BOSS_WARN=3.0;                /* 批次5:BOSS 出現前預留的警告秒數 */
+var MO_BOSS_WARN_BEEP=0.75;          /* 批次5:警告期間低音嗶嗶的間隔 */
 var bombs=0;                         /* 目前剩餘炸彈數(reset() 會初始化) */
 /* ---- 手機版數值層(批次2:套用上面的 MO_ 常數,不碰「平衡參數」區塊) ---- */
-var MO_EASY=false;                   /* 手機簡易難度開關(暫停選單 btnDiff 切換) */
-var MO_EASY_MUL=0.85;                /* 簡易折扣,只寫這裡一次(血量x0.85、敵彈密度x0.85) */
-function easyHp(){return MO_EASY?MO_EASY_MUL:1;}
-function easyGap(){return MO_EASY?1/MO_EASY_MUL:1;}   /* 密度x0.85 → 開火間隔除以 0.85 */
+/* ---- 批次6:三檔難度(0=保守 1=中 2=硬核)。主選單三顆按鈕可選,localStorage 記憶,HUD 標示。 ----
+   MO_EASY 保留為「保守」旗標,給暫停選單那一列與舊測試用,一律由 moDiffSet 同步。 */
+var MO_EASY=false;
+var MO_DIFF=1;                       /* 目前難度索引 */
+var MO_DIFF_NAME=['保守','中','硬核'];
+var MO_DIFF_T=[
+  /* hp=小怪/BOSS血量, foe=敵彈密度(開火間隔除以它), foeSpd=敵彈速度,
+     drop=掉落率, upSub=永久強化占比, hpAdd=玩家裝甲格數, bomb=起始炸彈數,
+     inv=無敵秒數倍率, pat=BOSS 套路解鎖提前/延後, ph1/ph2=BOSS 形態切換的血量門檻 */
+  {hp:0.75,foe:0.80,foeSpd:0.90,drop:1.30,upSub:1.15,hpAdd:1,bomb:1,inv:1.4,pat:-1,ph1:0.55,ph2:0.25},
+  {hp:1.00,foe:1.00,foeSpd:1.00,drop:1.00,upSub:1.00,hpAdd:0,bomb:0,inv:1.0,pat:0, ph1:0.66,ph2:0.33},
+  {hp:1.40,foe:1.20,foeSpd:1.10,drop:0.80,upSub:0.85,hpAdd:-1,bomb:-1,inv:0.7,pat:1, ph1:0.78,ph2:0.45}
+];
+function DIF(){return MO_DIFF_T[MO_DIFF]||MO_DIFF_T[1];}
+function moDiffSet(v){v=(v|0);if(!(v>=0&&v<=2))v=1;MO_DIFF=v;MO_EASY=(v===0);
+  try{localStorage.setItem('starstriker.diff',''+v);}catch(e){}}
+function moDiffLoad(){var v=1;
+  try{var s=parseInt(localStorage.getItem('starstriker.diff'),10);if(s===0||s===1||s===2)v=s;}catch(e){}
+  MO_DIFF=v;MO_EASY=(v===0);return v;}
+function moDiffCycle(){moDiffSet((MO_DIFF+1)%3);}
+function easyHp(){return DIF().hp;}                     /* 敵機/BOSS 血量倍率 */
+function easyGap(){return 1/DIF().foe;}                 /* 密度高 → 開火間隔短 */
+function lateFoe(){return Math.max(LATE_FIRE_MUL,1-Math.max(0,wave-LATE_FROM)*LATE_FIRE);}
+moDiffLoad();
 function foeR(type){return FOES[type].r*MO_FOE_R;}    /* 敵機半徑:只在这里乘 MO_FOE_R */
 function moN(n){return Math.max(1,Math.ceil(n*MO_SX));}  /* 橫向扇形/環狀彈幕的子彈數 */
 var dropPool=['rapid','dmg','drone','rapid','dmg','spread'],dropIdx=0;
@@ -305,7 +347,9 @@ var P={rapid:{n:'射速+',c:'#ffd166'},dmg:{n:'傷害+',c:'#ff6b81'},spread:{n:'
 function makePlayer(){
   var sh=SHIPS[shipIdx];
   var lv={};for(var i=0;i<AMMO_KEYS.length;i++)lv[AMMO_KEYS[i]]=1;
-  return {x:W/2,y:H-90,r:15,speed:sh.speed,cool:0,hp:sh.hp,maxhp:sh.hp,inv:1.2,alive:true,
+  var extraHp=DIF().hpAdd;               /* 批次6:保守 +1 格裝甲,硬核 -1 格 */
+  var hp=Math.max(2,sh.hp+extraHp);
+  return {x:W/2,y:H-90,r:15,speed:sh.speed,cool:0,hp:hp,maxhp:hp,inv:1.2*DIF().inv,alive:true,
     bank:0,ammo:sh.ammo,ammoLvl:lv,up:{rapid:0,dmg:0,spread:0,drone:0},dcool:0};
 }
 function reset(){
@@ -316,7 +360,8 @@ function reset(){
   shake=0;flash=0;clearT=0;shotN=0;
   dropIdx=0;dropPool=['rapid','dmg','drone','rapid','dmg','spread'];
   bossKills=0;formQ=[];pauseIdx=0;foesSingle=0;foesForm=0;
-  bombs=MO_BOMB_START;                    /* 批次3:炸彈鈕的炸彈數 */
+  bossWarn=0;warnBeep=0;                 /* 批次5:警示倒數归零 */
+  bombs=Math.max(0,Math.min(MO_BOMB_MAX,MO_BOMB_START+DIF().bomb));   /* 批次3/6:炸彈鈕的炸彈數(難度調整) */
   dronesMake();
 }
 function dronesMake(){
@@ -326,12 +371,18 @@ function dronesMake(){
 }
 function fireInterval(){
   var sh=SHIPS[shipIdx];
-  var v=AMMO[player.ammo].rate*sh.rateMul*Math.pow(0.88,player.up.rapid);
+  /* 批次6:射速強化只算到 RAPID_EFF 級,之後再抽 rapid 也不會把射速推到失控 */
+  var v=AMMO[player.ammo].rate*sh.rateMul*Math.pow(0.88,Math.min(player.up.rapid,RAPID_EFF));
   return Math.max(0.045,v);
+}
+function upDmgFactor(){
+  /* 批次6:傷害強化前 DMG_SOFT 級每級 +15%,之後每級只有 +6%(邊際遞減) */
+  var d=player?player.up.dmg:0;
+  return Math.pow(UP_DMG,Math.min(d,DMG_SOFT))*Math.pow(DMG_SOFT_MUL,Math.max(0,d-DMG_SOFT));
 }
 function shotDamage(){
   var k=player.ammo,a=AMMO[k];
-  return DMG_SCALE*a.dmg*(1+LVL_DMG*(player.ammoLvl[k]-1))*SHIPS[shipIdx].dmgMul*Math.pow(UP_DMG,player.up.dmg);
+  return DMG_SCALE*a.dmg*(1+LVL_DMG*(player.ammoLvl[k]-1))*SHIPS[shipIdx].dmgMul*upDmgFactor();
 }
 
 /* ============ 4. 輸入 ============ */
@@ -357,13 +408,14 @@ window.addEventListener('keydown',function(e){
     moToggleMusic();
   }
   if(k==='z'||k==='Z'){
-    if(state===S.PLAY){
-      var i=AMMO_ORDER.indexOf(player.ammo);
-      player.ammo=AMMO_ORDER[(i+1)%AMMO_ORDER.length];
-      SFX.ammo();bannerMain('彈藥: '+AMMO[player.ammo].name,AMMO[player.ammo].desc,0.7,AMMO[player.ammo].color);
-    }
+    moWepSwitch(1);                       /* 批次5:與觸控武器鈕同一條路徑 */
   }
   if(state===S.MENU){
+    /* 批次6:難度 1/2/3 直接選,X 循環 */
+    if(k==='1'){moDiffSet(0);SFX.click();}
+    if(k==='2'){moDiffSet(1);SFX.click();}
+    if(k==='3'){moDiffSet(2);SFX.click();}
+    if(k==='x'||k==='X'){moDiffCycle();SFX.click();}
     if(k==='ArrowLeft'||k==='a'||k==='A'){shipIdx=(shipIdx+SHIPS.length-1)%SHIPS.length;SFX.click();}
     if(k==='ArrowRight'||k==='d'||k==='D'){shipIdx=(shipIdx+1)%SHIPS.length;SFX.click();}
     if(k==='ArrowUp'||k==='w'||k==='W'){sizeIdx=(sizeIdx+1)%SIZES.length;applySize();SFX.click();}
@@ -421,6 +473,7 @@ var MO_PMENU_TOP=H/2-115;                      /* 六列(手指列拆兩格)整�
 var MO_MENU_SHIP_CY=280;                       /* 主選單飛船展示/箭頭中心 y(H=900 重排) */
 var MO_MENU_START_Y=646;                       /* 主選單開戰按鈕上緣(240x56) */
 var MO_END_BTN_Y=570;                          /* 結算/過關大按鈕上緣(240x56,兩顆) */
+var MO_MENU_DIFF_Y=712;                        /* 批次6:主選單難度三鈕(96x48,在開戰鈕下方) */
 function pmenuRects(){                         /* 列矩形:手指列拆成 -/+ 兩格,共 7 格 */
   var r=[],i,y,hw;
   for(i=0;i<6;i++){
@@ -436,7 +489,7 @@ function pmenuRects(){                         /* 列矩形:手指列拆成 -/+ 
 function pmenuLabel(i){return i===3?'手指偏移':(i===4?'難度':(i===5?'音樂':PMENU[i]));}
 function pmenuValue(i){
   if(i===3)return String(MO_FINGER_OFF);
-  if(i===4)return MO_EASY?'簡易':'正常';
+  if(i===4)return MO_DIFF_NAME[MO_DIFF];
   if(i===5)return musicOn?'開':'關';
   return '';
 }
@@ -450,14 +503,31 @@ function pmenuIdxOf(k){
   return -1;
 }
 function moIsOverlayKind(k){                   /* 蓋在選單/結算層之上,要在該層之後繪製 */
-  return k==='shipL'||k==='shipR'||k==='start'||k==='resume'||k==='restart'||k==='menu'||
+  return k==='shipL'||k==='shipR'||k==='start'||k==='diff0'||k==='diff1'||k==='diff2'||k==='resume'||k==='restart'||k==='menu'||
          k==='finger-'||k==='finger+'||k==='diff'||k==='pmusic'||
          k==='bigRestart'||k==='bigMenu'||k==='next';
 }
 function moFingerAdj(d){                       /* 手指偏移 0~100,每步 MO_FINGER_STEP */
   MO_FINGER_OFF=Math.max(0,Math.min(100,MO_FINGER_OFF+d*MO_FINGER_STEP));
 }
-function moDiffToggle(){MO_EASY=!MO_EASY;}
+function moDiffToggle(){moDiffCycle();}   /* 批次6:暫停選單這一列循環 保守→中→硬核 */
+/* 批次5:觸控切換武器(與 PC 的 Q/E、手機的 Z 同一條路徑;dir=±1 沿 AMMO_ORDER 循環) */
+function moWepSwitch(dir){
+  if(state!==S.PLAY||!player||!player.alive)return false;
+  var N=AMMO_ORDER.length,i=AMMO_ORDER.indexOf(player.ammo);
+  if(i<0)i=0;
+  var j=(i+dir%N+N)%N;
+  if(j===i)return false;
+  player.ammo=AMMO_ORDER[j];
+  SFX.ammo();
+  bannerMain('彈藥: '+AMMO[player.ammo].name,AMMO[player.ammo].desc,0.7,AMMO[player.ammo].color);
+  return true;
+}
+function moWepPeek(dir){                  /* 按鈕下方要顯示的「下一發」彈藥 */
+  var N=AMMO_ORDER.length,i=player?AMMO_ORDER.indexOf(player.ammo):0;
+  if(i<0)i=0;
+  return AMMO[AMMO_ORDER[(i+dir%N+N)%N]];
+}
 function moShipSel(d){shipIdx=((shipIdx+d)%SHIPS.length+SHIPS.length)%SHIPS.length;SFX.click();}
 function moStartBtn(){if(state===S.MENU){SFX.click();startGame();}}
 function moNextBtn(){if(state===S.CLEAR){SFX.click();clearT=99;}}
@@ -473,6 +543,10 @@ function moPauseBtn(){                         /* 與鍵盤 Esc/p 完全相同�
 function moUIBtnsRaw(){                        /* 所有按鈕定義 + 可見條件 */
   var vp=(state===S.PLAY),L=[];
   L.push({name:'btnPause',vis:vp,x:W-8-MO_BTN_CTL,y:MO_BTN_TOP,w:MO_BTN_CTL,h:MO_BTN_CTL,kind:'pause',act:moPauseBtn});
+  /* ---- 批次5:武器切換鈕(右上鈕群,緊鄰暫停鈕左側;44px 以上、判定框不重疊、不在下方控制區) ---- */
+  var wx=W-8-MO_BTN_CTL-MO_BTN_GAP-MO_BTN_CTL;
+  L.push({name:'btnWepNext',vis:vp,x:wx,y:MO_BTN_TOP,w:MO_BTN_CTL,h:MO_BTN_CTL,kind:'wepR',act:function(){moWepSwitch(1);}});
+  L.push({name:'btnWepPrev',vis:vp,x:wx-MO_BTN_GAP-MO_BTN_CTL,y:MO_BTN_TOP,w:MO_BTN_CTL,h:MO_BTN_CTL,kind:'wepL',act:function(){moWepSwitch(-1);}});
   L.push({name:'btnMusic',vis:vp,x:8,y:H-130,w:MO_BTN_CTL,h:MO_BTN_CTL,kind:'music',act:moToggleMusic}); /* MOBILE-SPEC:遊戲中 音樂開關在左下(左下 HUD 三列文字在 H-60 以下,不重疊) */
   L.push({name:'btnBomb', vis:vp,x:W-8-MO_BTN_BOMB,y:H-8-MO_BTN_BOMB,w:MO_BTN_BOMB,h:MO_BTN_BOMB,kind:'bomb',act:moBomb});
   /* ---- 批次3B:主選單(飛船大箭頭 + 開戰大按鈕,鍵盤 ←→/Enter 兩條路徑都在) ---- */
@@ -480,6 +554,11 @@ function moUIBtnsRaw(){                        /* 所有按鈕定義 + 可見條
   L.push({name:'btnShipLeft', vis:vm,x:10,        y:MO_MENU_SHIP_CY-26,w:48,h:52,kind:'shipL',act:function(){moShipSel(-1);}});
   L.push({name:'btnShipRight',vis:vm,x:W-10-48,   y:MO_MENU_SHIP_CY-26,w:48,h:52,kind:'shipR',act:function(){moShipSel(1);}});
   L.push({name:'btnStart',    vis:vm,x:(W-240)/2, y:MO_MENU_START_Y,   w:240,h:56,kind:'start',act:moStartBtn});
+  /* ---- 批次6:主選單難度三鈕(96x48,判定框不重疊,目前難度高亮) ---- */
+  var mdx=(W-300)/2;
+  L.push({name:'btnDiff0',vis:vm,x:mdx,      y:MO_MENU_DIFF_Y,w:96,h:48,kind:'diff0',act:function(){SFX.click();moDiffSet(0);}});
+  L.push({name:'btnDiff1',vis:vm,x:mdx+102,  y:MO_MENU_DIFF_Y,w:96,h:48,kind:'diff1',act:function(){SFX.click();moDiffSet(1);}});
+  L.push({name:'btnDiff2',vis:vm,x:mdx+204,  y:MO_MENU_DIFF_Y,w:96,h:48,kind:'diff2',act:function(){SFX.click();moDiffSet(2);}});
   /* ---- 批次3B:暫停單屏(單擊=執行;PMENU 索引 0/1/2 與鍵盤/測試完全一致) ---- */
   var vq=(state===S.PAUSE),pr=pmenuRects();
   L.push({name:'btnResume',      vis:vq,x:pr[0].x,y:pr[0].y,w:pr[0].w,h:pr[0].h,kind:'resume',act:function(){moPauseRow(0);}});
@@ -543,6 +622,11 @@ function drawCtlButtons(overlay){              /* 只在按鈕存在的 state �
     if(b.kind==='bomb')edge=(bombs>0?'#ffd166':'#43536e');
     else if(b.kind==='start')edge='#ffd166';
     else if(b.kind==='next')edge='#7cff6b';
+    else if(b.kind==='wepL'||b.kind==='wepR')edge=(player?AMMO[player.ammo].color:'#7fe7ff');
+    else if(b.kind==='diff0'||b.kind==='diff1'||b.kind==='diff2'){
+      var dk=Number(b.kind.charAt(4));
+      edge=(MO_DIFF===dk)?(dk===2?'#ff4d6d':(dk===0?'#7cff6b':'#ffd166')):'#43536e';
+    }
     else edge=(off?'#43536e':'#7fe7ff');
     ctx.strokeStyle=edge;ctx.lineWidth=2;ctx.strokeRect(b.x+1,b.y+1,b.w-2,b.h-2);ctx.lineWidth=1;
     if(b.kind==='bomb'){
@@ -554,6 +638,10 @@ function drawCtlButtons(overlay){              /* 只在按鈕存在的 state �
     }else if(b.kind==='music'){
       text('♪',cx,cy+7,22,off?'#5d708f':'#7fe7ff','center');
       if(off)line(cx-9,cy-9,cx+9,cy+9,'#ff6b81',2,1);
+    }else if(b.kind==='wepL'||b.kind==='wepR'){   /* 批次5:武器切換(箭頭=方向,下方=切過去後的彈藥名) */
+      var wd=(b.kind==='wepL')?-1:1,np=moWepPeek(wd);
+      poly([[cx-9*wd,cy-15],[cx-9*wd,cy-1],[cx+10*wd,cy-8]],'#ffffff',null,0);
+      text(np.name,cx,cy+20,13,np.color,'center');
     }else if(b.kind==='shipL'||b.kind==='shipR'){
       var dd=(b.kind==='shipL')?-1:1;
       poly([[cx+11*dd,cy-13],[cx+11*dd,cy+13],[cx-13*dd,cy]],'#ffffff',null,0);
@@ -566,6 +654,11 @@ function drawCtlButtons(overlay){              /* 只在按鈕存在的 state �
     }else if(b.kind==='bigRestart'||b.kind==='bigMenu'){
       text(b.kind==='bigRestart'?'重新開始':'返回主選單',cx,cy+8,20,'#ffffff','center','#7fe7ff');
       text(b.kind==='bigRestart'?'R':'Esc',b.x+b.w-10,b.y+22,13,'#8fa6cc','right');
+    }else if(b.kind==='diff0'||b.kind==='diff1'||b.kind==='diff2'){
+      var di=Number(b.kind.charAt(4)),sel=(MO_DIFF===di);
+      if(sel){ctx.globalAlpha=0.20;ctx.fillStyle=edge;ctx.fillRect(b.x+2,b.y+2,b.w-4,b.h-4);ctx.globalAlpha=1;}
+      text(MO_DIFF_NAME[di],cx,cy+2,20,sel?'#ffffff':'#8fa6cc','center',sel?edge:null);
+      if(sel)text('目前',cx,b.y+b.h-5,13,edge,'center');
     }else{                                       /* 暫停單屏列(單擊=執行) */
       lx=(pi===pauseIdx)?'#ffffff':'#cfe0ff';
       if(b.kind==='finger-'){
@@ -582,7 +675,7 @@ function drawCtlButtons(overlay){              /* 只在按鈕存在的 state �
         }else text(b.kind==='restart'?'R':(b.kind==='menu'?'M':'D'),b.x+21,cy+7,18,'#8fa6cc','center');
         text(pmenuLabel(pi),b.x+40,cy+7,18,lx,'left');
         if(pi>=3)text(pmenuValue(pi),b.x+b.w-10,cy+7,18,
-          (pi===4)?(MO_EASY?'#ffd166':'#7fe7ff'):(pi===5?(musicOn?'#7cff6b':'#5d708f'):'#ffd166'),'right');
+          (pi===4)?(MO_DIFF===2?'#ff4d6d':(MO_DIFF===0?'#7cff6b':'#ffd166')):(pi===5?(musicOn?'#7cff6b':'#5d708f'):'#ffd166'),'right');
       }
     }
   }
@@ -633,7 +726,7 @@ function moVisibility(hidden){
   }else if(MO_BGPAUSE){
     MO_BGPAUSE=false;
     if(state===S.PAUSE){
-      if(player&&player.alive)player.inv=Math.max(player.inv,MO_INVULN_ON_RESUME);
+      if(player&&player.alive)player.inv=Math.max(player.inv,MO_INVULN_ON_RESUME*DIF().inv);
       setState(S.PLAY);setMusic(musicOn?(boss?'boss':'calm'):'off');
     }
   }
@@ -650,7 +743,7 @@ function pauseAct(){
   else if(a===5){moToggleMusic();}
 }
 /* ============ 5. 繪圖工具:光暁圖集 / 粒子 / 星域背景 ============ */
-var GLOWC={},BG=null,nebT=0;
+var GLOWC={},BG=null,nebT=0,BGH=0;   /* BGH = 背景圖高度,只做一次,tiling 與滾動都用它 */
 function hexA(hex,a){
   var h=hex.charAt(0)==='#'?hex.slice(1):hex;
   if(h.length===3)h=h.charAt(0)+h.charAt(0)+h.charAt(1)+h.charAt(1)+h.charAt(2)+h.charAt(2);
@@ -709,31 +802,41 @@ function makeStars(){
   }
 }
 function makeNebula(){
+  BGH=H*2;                                        /* 任務2:背景高度只用這一個變數 */
   BG=document.createElement('canvas');
-  BG.width=W;BG.height=H*2;
+  BG.width=W;BG.height=BGH;
   var c=BG.getContext('2d');
-  c.fillStyle='#05070f';c.fillRect(0,0,W,H*2);
+  c.fillStyle='#05070f';c.fillRect(0,0,W,BGH);
   var cols=['#1b2a6b','#3a1b5e','#0e4a52','#4a1b33','#123a2e','#2b1e5a'];
+  /* 任務2:每團暈開的色塊另外画上下左右共 9 份(只画有碰到畫布的那幾份),
+     所以 canvas 邊緣不會被硬切,上下兩張拼接處不會出現水平硬邊/矩形色塊 */
+  function blob(x,y,r,col){
+    for(var oy=-1;oy<=1;oy++){
+      for(var ox=-1;ox<=1;ox++){
+        var px=x+ox*W,py=y+oy*BGH;
+        if(px+r<0||px-r>W||py+r<0||py-r>BGH)continue;
+        var gr=c.createRadialGradient(px,py,0,px,py,r);
+        gr.addColorStop(0,hexA(col,0.30));
+        gr.addColorStop(0.65,hexA(col,0.10));
+        gr.addColorStop(1,hexA(col,0));
+        c.fillStyle=gr;c.beginPath();c.arc(px,py,r,0,6.2832);c.fill();
+      }
+    }
+  }
   for(var i=0;i<16;i++){
-    var x=Math.random()*W,y=Math.random()*H*2,r=90+Math.random()*230;
-    var col=cols[(Math.random()*cols.length)|0];
-    var gr=c.createRadialGradient(x,y,0,x,y,r);
-    gr.addColorStop(0,hexA(col,0.40));
-    gr.addColorStop(0.6,hexA(col,0.12));
-    gr.addColorStop(1,hexA(col,0));
-    c.fillStyle=gr;c.beginPath();c.arc(x,y,r,0,6.2832);c.fill();
+    blob(Math.random()*W,Math.random()*BGH,120+Math.random()*240,cols[(Math.random()*cols.length)|0]);
   }
   for(var j=0;j<420;j++){
-    var a2=Math.random()*0.55;
+    var a2=Math.random()*0.45;
     c.fillStyle='rgba(255,255,255,'+a2.toFixed(3)+')';
-    c.fillRect((Math.random()*W)|0,(Math.random()*H*2)|0,1,1);
+    c.fillRect((Math.random()*W)|0,(Math.random()*BGH)|0,1,1);
   }
 }
 function drawBG(dt){
   ctx.fillStyle='#04060d';ctx.fillRect(0,0,W,H);
   if(BG){
-    nebT=(nebT+dt*22)%(H*2);
-    ctx.drawImage(BG,0,nebT-H*2);
+    nebT=(nebT+dt*22)%BGH;                        /* 兩張的起點剛好差 BGH,無縫接軌 */
+    ctx.drawImage(BG,0,nebT-BGH);
     ctx.drawImage(BG,0,nebT);
   }
   for(var i=0;i<stars.length;i++){
@@ -765,14 +868,19 @@ function spark(x,y,c,n,pow){
 function trailPuff(x,y,c){
   part(x,y,(Math.random()-0.5)*30,(Math.random()*40+20),0.35+Math.random()*0.25,2+Math.random()*2,c,true,0.6);
 }
-function boom(x,y,size,color,quiet,shk){
+function boom(x,y,size,color,quiet,shk,nofl){
   spark(x,y,color,Math.min(46,10+size*3),size*9);
   for(var i=0;i<3;i++)part(x,y,(Math.random()-0.5)*60,(Math.random()-0.5)*60,0.5+Math.random()*0.4,size*0.9+4,'#ffffff',true,0.4);
   ring(x,y,size*0.4,size*3.2,0.35,'#ffffff',3);
   ring(x,y,size*0.2,size*2.4,0.5,color,5);
-  flash=Math.min(0.5,flash+size*0.008);
-  shake=Math.min(26,shake+size*(shk===undefined?0.5:shk));
+  if(!nofl)flash=Math.min(0.5,flash+size*(0.008+FLASH_SHOT));
+  if(!shakeMute)shake=Math.min(26,shake+size*(shk===undefined?0.5:shk));   /* 批次8:旗標開時不震 */
   if(!quiet)SFX.boom(Math.min(1.4,0.6+size*0.06));
+}
+function glowBall(x,y,r,c){   /* 批次7:命中點局部光球,取代全屏閃爍 */
+  if(r<=0)return;
+  part(x,y,0,0,0.18,r*0.42,'#ffffff',true,0.9);
+  part(x,y,0,0,0.30,r,c,true,0.6);
 }
 function boomQueue(x,y,size,color,delay){booms.push({x:x,y:y,s:size,c:color,t:delay});}
 function updateBooms(dt){
@@ -833,12 +941,16 @@ function startGame(){
   startWave();
 }
 function nextWave(){
-  betweenWaves=true;waveTimer=1.7;setState(S.PLAY);
+  betweenWaves=true;setState(S.PLAY);
+  /* 批次5:下一波是 BOSS → 預留 MO_BOSS_WARN 秒的紅色閃爍警告 */
+  if((wave+1)%5===0){bossWarn=MO_BOSS_WARN;warnBeep=0;waveTimer=bossWarn;}
+  else{bossWarn=0;waveTimer=1.7;}
   setMusic(musicOn?'calm':'off');
 }
 function startWave(){
   wave++;betweenWaves=false;
   if(wave%5===0){
+    bossWarn=0;warnBeep=0;
     spawnBoss(wave/5);
     bannerMain('警告:BOSS 接近','第 '+(wave/5)+' 階 旗艦',1.9,'#ff4d6d');
     SFX.warn();setMusic(musicOn?'boss':'off');
@@ -856,6 +968,12 @@ function pickType(){
   if(wave>=5)w.push(['tank',8]);
   if(wave>=6)w.push(['bomber',11]);
   if(wave>=7)w.push(['splitter',9]);
+  /* 批次6:第 12 波之後重裝敵機(tank/bomber/splitter)占比逐步提高 */
+  if(wave>=12){
+    var hb=Math.min(18,(wave-11)*1.5);
+    for(var q=0;q<w.length;q++)
+      if(w[q][0]==='tank'||w[q][0]==='bomber'||w[q][0]==='splitter')w[q][1]+=hb;
+  }
   var tot=0,i;
   for(i=0;i<w.length;i++)tot+=w[i][1];
   var r=Math.random()*tot;
@@ -864,8 +982,9 @@ function pickType(){
 }
 function spawnFoe(type,x,y){
   var d=FOES[type];
-  var hpMul=(1+wave*WAVE_HP)*Math.pow(KILL_HP,bossKills);
-  var f={type:type,x:x,y:y,r:foeR(type),hp:d.hp*hpMul*easyHp(),spd:d.spd*(1+wave*0.012),score:d.score,
+  var hpMul=(1+wave*WAVE_HP)*(1+Math.max(0,wave-LATE_FROM)*LATE_HP)*Math.pow(KILL_HP,bossKills);
+  var f={type:type,x:x,y:y,r:foeR(type),hp:d.hp*hpMul*easyHp(),
+    spd:d.spd*(1+wave*0.012+Math.max(0,wave-LATE_FROM)*LATE_SPD),score:d.score,
     color:d.color,bc:d.bc,t:0,ph:Math.random()*6.28,fire:0.8+Math.random()*1.4,flash:0,
     vy:d.spd,spin:0,dead:false,id:++foeId};
   if(type==='bomber')f.vy=d.spd*0.6;
@@ -874,9 +993,15 @@ function spawnFoe(type,x,y){
   return f;
 }
 var foeId=0;
-function foeBullet(x,y,ang,spd,r,color){
-  if(foeBullets.length>MO_CAP_FOEB)return;
-  foeBullets.push({x:x,y:y,vx:Math.cos(ang)*spd*MO_SX,vy:Math.sin(ang)*spd*MO_SY,r:r,c:color,t:0});
+function foeBullet(x,y,ang,spd,r,color,opt){
+  if(foeBullets.length>MO_CAP_FOEB)return null;
+  var bb={x:x,y:y,vx:Math.cos(ang)*spd*MO_SX,vy:Math.sin(ang)*spd*MO_SY,r:r,c:color,t:0};
+  if(opt){                                  /* 批次5C:追蹤彈 opt={h:每秒最大轉向弧度, hl:追蹤秒數} */
+    if(opt.h){bb.h=opt.h;bb.hl=opt.hl||2.0;}
+    if(opt.w)bb.w=1;                        /* 視覺:飛彈尾焰 */
+  }
+  foeBullets.push(bb);
+  return bb;
 }
 function foeShootAimed(f,spd){
   var a=Math.atan2(player.y-f.y,player.x-f.x);
@@ -888,7 +1013,28 @@ function fanFoe(f,n,base,step,spd){
   for(var i=0;i<m;i++)foeBullet(f.x,f.y+f.r*0.5,base+(i-(m-1)/2)*step,spd,f.r*0.3,f.bc);
   tone({f:640,f2:300,t:0,dur:0.09,type:'sawtooth',vol:0.055});
 }
-var FORMN=['單縱隊','雙縱隊','橫隊','雁行陣','菱形陣'];
+var FORMN=['單縱隊','雙縱隊','橫隊','雁行陣','菱形陣','菱形護衛','左右夾擊','蛇形S','交叉對角','慢速鐵幕','環形合圍'];
+/* ---- 批次5:編隊解放表 [kind, 解放波數, 基礎權重](後期編隊權重隨波數遞增,前期仍以基本陣形為主) ---- */
+var FORM_UNLOCK=[[0,1,10],[1,1,9],[2,1,8],[3,2,7],[4,3,6],
+                 [5,4,6],[6,5,6],[7,6,6],[8,8,5],[9,10,5],[10,12,5]];
+function formPick(){
+  var tot=0,i,k,w,r;
+  for(i=0;i<FORM_UNLOCK.length;i++){
+    k=FORM_UNLOCK[i];
+    if(wave<k[1])continue;
+    tot+=k[2]+Math.min(6,wave-k[1]);
+  }
+  if(tot<=0)return 0;
+  r=Math.random()*tot;
+  for(i=0;i<FORM_UNLOCK.length;i++){
+    k=FORM_UNLOCK[i];
+    if(wave<k[1])continue;
+    w=k[2]+Math.min(6,wave-k[1]);
+    r-=w;
+    if(r<=0)return k[0];
+  }
+  return 0;
+}
 function formationPts(kind,n){
   var pts=[],i,m,k,side;
   if(kind===0){                       /* 一字縱隊 */
@@ -911,13 +1057,51 @@ function formationPts(kind,n){
     c3=Math.max(46+maxo,Math.min(W-46-maxo,c3));
     pts.push([c3,-36,0]);
     for(i=1;i<n;i++){side=(i%2)?1:-1;k=Math.ceil(i/2);pts.push([c3+side*k*54,-36-k*46,k*0.10]);}
-  }else{                              /* 菱形陣 */
+  }else if(kind===4){                 /* 菱形陣 */
     var c4=W*0.25+Math.random()*W*0.5;
     pts.push([c4,-36,0]);
     pts.push([c4-56,-36-44,0.14]);pts.push([c4+56,-36-44,0.14]);
     pts.push([c4,-36-88,0.24]);
     if(n>5)pts.push([c4-96,-36-88,0.30]);
     if(n>6)pts.push([c4+96,-36-88,0.30]);
+  }else if(kind===5){                 /* 菱形護衛隊:四機護航把中央重裝機包在中間 */
+    var c5=W*0.28+Math.random()*W*0.44;
+    pts.push([c5-58,-36,0.00,'grunt']);
+    pts.push([c5+58,-36,0.00,'grunt']);
+    pts.push([c5,-36,0.30,'tank']);                 /* 本體晚一點進場,先被護航擋住 */
+    pts.push([c5-104,-36-52,0.12,'zig']);
+    pts.push([c5+104,-36-52,0.12,'zig']);
+  }else if(kind===6){                 /* 左右夾擊:貼兩側的雙縱隊,鋸齒機邊走邊往中間切 */
+    var lx=Math.max(46,W*0.15),rx=Math.min(W-46,W*0.85);
+    m=Math.ceil(n/2);
+    for(i=0;i<m;i++){
+      pts.push([lx,-34-i*56,i*0.10,'zig']);
+      pts.push([rx,-34-i*56,i*0.10+0.06,'zig']);
+    }
+  }else if(kind===7){                 /* 蛇形S曲線:單列連成一条 S,波形橫幅不會超出畫布 */
+    var amp7=Math.min(W/2-46,124),ph7=Math.random()*6.28;
+    for(i=0;i<n;i++)pts.push([W/2+Math.sin(ph7+i*0.85)*amp7,-34-i*46,i*0.13,'grunt']);
+  }else if(kind===8){                 /* 交叉對角線:兩條對角線錯開時間進場,在畫面中央交叉 */
+    m=Math.max(2,Math.ceil(n/2));
+    var dx8=(W-72)/Math.max(1,m-1);
+    for(i=0;i<m;i++){
+      pts.push([36+i*dx8,-34-i*50,i*0.06,'zig']);
+      pts.push([W-36-i*dx8,-34-i*50,i*0.06+0.34,'shooter']);
+    }
+  }else if(kind===9){                 /* 慢速鐵幕:整排慢速壓下,只留一個可穿過的缺口(兩側留邊,不會貼死) */
+    var cnt9=MO_FORM_ROW_MAX+2,hole9=1+((Math.random()*(cnt9-2))|0),sp9=(W-72)/(cnt9-1);
+    for(i=0;i<cnt9;i++){
+      if(i===hole9)continue;
+      pts.push([36+i*sp9,-32-(i%2)*18,i*0.04,'grunt',0.50]);
+    }
+  }else{                              /* 環形合圍:上半圓罩下來,正中央刻意留出口 */
+    var R10=Math.min(W*0.42,168),cnt10=Math.max(6,Math.min(9,n+2)),a10,x10;
+    for(i=0;i<cnt10;i++){
+      a10=Math.PI*(i+0.5)/cnt10;
+      x10=W/2-Math.cos(a10)*R10;
+      if(Math.abs(x10-W/2)<52)continue;             /* 中央出口 */
+      pts.push([x10,-40-Math.sin(a10)*R10*0.55,i*0.05,'grunt',0.78]);
+    }
   }
   for(i=0;i<pts.length;i++)pts[i][0]=Math.max(34,Math.min(W-34,pts[i][0]));
   return pts;
@@ -925,19 +1109,27 @@ function formationPts(kind,n){
 function spawnFormation(){
   var t=pickType();
   if(t==='diver')t='grunt';                 /* 突襲型會脱隊,不排入編隊 */
-  var kind=(Math.random()*5)|0;
+  var kind=formPick();                       /* 批次5:依波數加權解鎖(不再 5 種均分) */
   var want=FORM_SIZE+((Math.random()*4)|0);      /* 4~7,橫隊/菱形可能更多 */
   var pts=formationPts(kind,want);
-  var fr=foeR(t),xlo=fr+2,xhi=W-fr-2;            /* 所有生成 x 落在 [r+2, W-r-2] */
+  var fr,xlo,xhi,q;
   for(var i=0;i<pts.length;i++){
-    pts[i][0]=Math.max(xlo,Math.min(xhi,pts[i][0]));
-    formQ.push({type:t,x:pts[i][0],y:pts[i][1],d:pts[i][2]});
+    q=(pts[i][3]||t);                        /* 點位可指定機型(護衛/夾擊/鐵幕) */
+    fr=foeR(q);xlo=fr+2;xhi=W-fr-2;          /* 所有生成 x 落在 [r+2, W-r-2] */
+    formQ.push({type:q,x:Math.max(xlo,Math.min(xhi,pts[i][0])),y:pts[i][1],
+      d:pts[i][2],sm:pts[i][4]||1});         /* sm=速度倍率(慢速鐵幕/環形用) */
   }
   if(Math.random()<0.5)bannerMain('敵機編隊',''+FORMN[kind],1.0,'#ff9f43');
   return pts.length;
 }
 function updateWaves(dt){
   if(betweenWaves){
+    /* 批次5:BOSS 前的 3 秒警告(紅色大標題閃爍 + 低频嗶聲),倒數結束才真正出場 */
+    if(bossWarn>0){
+      bossWarn-=dt;warnBeep-=dt;
+      if(warnBeep<=0){warnBeep=MO_BOSS_WARN_BEEP;tone({f:190,f2:120,t:0,dur:0.30,type:'square',vol:0.075});}
+      if(bossWarn<0)bossWarn=0;
+    }
     waveTimer-=dt;
     if(waveTimer<=0)startWave();
     return;
@@ -960,12 +1152,18 @@ function updateWaves(dt){
   }
   for(var fi=formQ.length-1;fi>=0;fi--){
     var qq=formQ[fi];qq.d-=dt;
-    if(qq.d<=0){spawnFoe(qq.type,qq.x,qq.y);formQ.splice(fi,1);}
+    if(qq.d<=0){
+      var mf=spawnFoe(qq.type,qq.x,qq.y);
+      if(mf&&qq.sm&&qq.sm!==1){mf.spd*=qq.sm;if(mf.vy>0)mf.vy*=qq.sm;}   /* 批次5:慢速編隊 */
+      formQ.splice(fi,1);
+    }
   }
   if(!boss&&spawnLeft<=0&&foes.length===0&&formQ.length===0&&!betweenWaves){
     var giveUp=(wave%2===0);
     bannerMain('WAVE '+wave+' 清除',giveUp?'獎勵強化即將送達':'戰場上可能還有獎勵',1.5,'#7cff6b');
-    betweenWaves=true;waveTimer=1.9;
+    betweenWaves=true;
+    if((wave+1)%5===0){bossWarn=MO_BOSS_WARN;warnBeep=0;waveTimer=bossWarn;}   /* 批次5:下一波是 BOSS → 3 秒警告 */
+    else{bossWarn=0;waveTimer=1.9;}
     if(bombs<MO_BOMB_MAX)bombs=Math.min(MO_BOMB_MAX,bombs+MO_BOMB_WAVE);   /* 批次3:清一波補炸彈 */
     drop(W/2-60,60,giveUp?'up':null);
   }
@@ -981,12 +1179,30 @@ function bossHpScale(){
   return Math.min(4.0,1+u*HPS_UP+(avg-1)*HPS_LV);
 }
 function spawnBoss(tier){
-  var hp=Math.round((BOSS_HP0+BOSS_HP1*tier+BOSS_HP2*tier*tier)*bossHpScale());
+  var hp=Math.round((BOSS_HP0+BOSS_HP1*tier+BOSS_HP2*tier*tier)*bossHpScale()*easyHp());
   boss={x:W/2,y:-90,r:52+tier*5,hp:hp,maxhp:hp,tier:tier,t:0,flash:0,
     fire:1.4,pi:-1,spin:0,q:[],alive:true,entering:true,enraged:false,
-    patterns:[0,1,2,3,4,5].slice(0,Math.min(6,2+tier))};
+    patterns:bossPatternSet(tier,0),
+    phase:0,aim:null,aimT:0};
 }
-function bq(b,delay,ang,spd,r,color){b.q.push({t:delay,a:ang,s:spd,r:r,c:color});}
+/* 批次5:BOSS 攻擊組合。ph=形態(0/1/2),血量 66% 與 33% 時解鎖更多套路;
+   同一時刻只施放一套,保持可預判節奏,不用隨機傳送。 */
+function bossPatternSet(tier,ph){
+  var t=Math.max(0,tier+DIF().pat);   /* 批次6:硬核提前解鎖套路,保守延後 */
+  var L=[0,1,2,3,4,5].slice(0,Math.min(6,2+t));
+  if(ph>=1){
+    L=[0,1,2,3,4,5].slice(0,Math.min(6,3+t));
+    L.push(6);L.push(7);
+    /* 批次8:移除 p===11 橫向雷射(全場掃射無法閃避),不再push */
+  }
+  if(ph>=2){
+    L.push(8);L.push(9);L.push(10);
+  }
+  return L;
+}
+/* bq:延遲施放。opt.ox=相對 BOSS 的橫向偏移(真橫向彈幕),
+   opt.h=轉向速率(rad/s)、opt.hl=追蹤秒數、opt.w=飛彈尾焰。 */
+function bq(b,delay,ang,spd,r,color,opt){b.q.push({t:delay,a:ang,s:spd,r:r,c:color,o:opt});}
 function bossFire(b){
   var enr=b.enraged;
   var sp=(150+14*b.tier)*(enr?1.25:1);
@@ -1027,29 +1243,89 @@ function bossFire(b){
     for(i=0;i<moN(10);i++)bq(b,i*0.055,b.spin+i*0.36,sp*1.05,6,'#7cff6b');
     b.spin+=0.72;
     tone({f:700,f2:1400,t:0,dur:0.16,type:'sawtooth',vol:0.05});
+  }else if(p===6){
+    /* 預警大扇形:先 0.45s 紅色瞄準線(細虛線由 BOSS 指向玩家),再沿同一線開出寬扇形 */
+    n=enr?13:9;
+    b.aim={t:0.45,a:pa};
+    for(i=0;i<n;i++)bq(b,0.45+i*0.03,pa+(i-(n-1)/2)*0.135,sp*1.35,6,'#ff9f43');
+    tone({f:250,f2:520,t:0,dur:0.22,type:'sawtooth',vol:0.05});
+  }else if(p===7){
+    /* 雙臂螺旋:兩條相反手臂同步射出,每次施放整組轉 30° → 手臂慢慢掃過畫面 */
+    n=moN(7+b.tier);
+    for(i=0;i<n;i++){
+      bq(b,i*0.055,b.spin+i*0.30,sp*0.85,6,'#7cff6b');
+      bq(b,i*0.055+0.028,b.spin+3.1416+i*0.30,sp*0.85,6,'#7cff6b');
+    }
+    b.spin+=0.52;
+    tone({f:720,f2:1450,t:0,dur:0.16,type:'sawtooth',vol:0.045});
+  }else if(p===8){
+    /* 缺口環:慢速同心環固定留一個約 57° 缺口,缺口位置每次轉 50°(站在缺口方向即安全) */
+    n=moN(15+2*b.tier);
+    var g8=b.spin*0.8,a8;
+    for(i=0;i<n;i++){
+      a8=(i/n)*6.2832+b.spin;
+      if(Math.abs(Math.atan2(Math.sin(a8-g8),Math.cos(a8-g8)))<0.50)continue;
+      bq(b,(i%4)*0.05,a8,sp*0.55,6,'#b98cff');
+    }
+    b.spin+=0.87;
+    nz({t:0,dur:0.20,vol:0.09,freq:1250,f2:520});
+  }else if(p===9){
+    /* 追蹤飛彈:慢速,轉向速率上限 1.15 rad/s 且只追 2.2s,亮尾焰辨識是飛彈 */
+    n=2+(b.tier>=3?1:0);
+    for(i=0;i<n;i++)bq(b,i*0.20,pa+(i-(n-1)/2)*0.55,104+10*b.tier,7,'#ff9f43',{h:1.15,hl:2.2,w:1});
+    tone({f:330,f2:170,t:0,dur:0.18,type:'square',vol:0.05});
+  }else if(p===10){
+    /* 追身彈牆:真橫向彈幕(opt.ax 由各自的格 x 射出,不塌成時間串流)。
+       缺口以「格數」判定:半寬 = gw/MO_BOSS_WALL_GAP 格(與 p3 同式),第一輪對準玩家,
+       第二輪缺口往反方向移 3+(tier 上限 3) 格 → 必須橫向走位。 */
+    var wg10=(W-50)/MO_BOSS_WALL_CELLS;
+    var gc10=Math.max(1,Math.max(46,74-6*b.tier)/MO_BOSS_WALL_GAP);
+    var pc10=Math.max(1,Math.min(MO_BOSS_WALL_CELLS-2,Math.round((player.x-30)/wg10)));
+    for(var rw=0;rw<2;rw++){
+      var hl10=pc10+(rw?-(3+Math.min(3,b.tier)):0);
+      for(var c10=0;c10<MO_BOSS_WALL_CELLS;c10++){
+        if(Math.abs(c10-hl10)<gc10)continue;
+        bq(b,rw*0.55+c10*0.014,Math.PI/2,sp*0.85,8,'#4ef2c0',{ax:30+c10*wg10});
+      }
+    }
+    tone({f:300,f2:160,t:0,dur:0.18,type:'square',vol:0.05});
   }else{
     var t2=['grunt','zig','diver'][(Math.random()*3)|0];
-    for(i=0;i<2+b.tier;i++)spawnFoe(t2,60+Math.random()*(W-120),30+Math.random()*50);
-    bannerMain('敵援軍出現','',1.0,'#ffd166');
-    SFX.growl();
+    var ec=Math.min(2+b.tier,Math.max(0,12-foes.length));   /* 批次5:援軍上限,不讓畫面被小怪淹沒 */
+    for(i=0;i<ec;i++)spawnFoe(t2,60+Math.random()*(W-120),30+Math.random()*50);
+    if(ec>0){bannerMain('敵援軍出現','',1.0,'#ffd166');SFX.growl();}
   }
 }
+/* 批次8:横向雷射套路(p===11)與 updateBeam() 已移除——全場掃射無法閃避 */
 function updateBoss(dt){
   var b=boss;if(!b)return;
   b.t+=dt;
   if(b.flash>0)b.flash-=dt;
   for(var i=b.q.length-1;i>=0;i--){
     var s=b.q[i];s.t-=dt;
-    if(s.t<=0){foeBullet(b.x,b.y+12,s.a,s.s,s.r,s.c);b.q.splice(i,1);}
+    if(s.t<=0){
+      /* opt.ax = 螢幕絕對 x(真橫向彈幕),否則由 BOSS 位置射出 */
+      foeBullet((s.o&&s.o.ax!==undefined)?s.o.ax:b.x,b.y+12,s.a,s.s,s.r,s.c,s.o);
+      b.q.splice(i,1);
+    }
   }
+  if(b.aim){b.aim.t-=dt;if(b.aim.t<=0)b.aim=null;}
   if(b.entering){
     b.y+=70*dt;
     if(b.y>=110){b.entering=false;SFX.growl();}
     return;
   }
-  var amp=W*0.30;
-  b.x=W/2+Math.sin(b.t*0.62)*amp;
-  b.y=110+Math.sin(b.t*1.1)*22;
+  /* 形態切換:血量 66% / 33% 解鎖新套路,並清掉未施放的佇列(避免换形態瞬間爆量) */
+  var frac=b.hp/b.maxhp,dt2=DIF(),ph=(frac<dt2.ph2)?2:((frac<dt2.ph1)?1:0);
+  if(ph!==b.phase){
+    b.phase=ph;b.patterns=bossPatternSet(b.tier,ph);b.pi=-1;
+    b.aim=null;b.q.length=0;
+    if(ph===1){bannerMain('BOSS 第二形態','攻擊型態改變!',1.2,'#ff9f43');SFX.growl();ring(b.x,b.y,16,190,0.6,'#ff9f43',5);}
+    else{bannerMain('BOSS 最終形態','全面解放!',1.2,'#ff4d6d');SFX.growl();ring(b.x,b.y,16,250,0.7,'#ff4d6d',6);}
+  }
+  var amp=(b.phase===1?W*0.34:(b.phase===2?W*0.26:W*0.30));
+  b.x=W/2+Math.sin(b.t*(b.phase===2?0.78:0.62))*amp;
+  b.y=(b.phase===2?100:110)+Math.sin(b.t*(b.phase===2?1.45:1.1))*(b.phase===2?30:22);
   if(!b.enraged&&b.hp<b.maxhp*0.35){
     b.enraged=true;
     bannerMain('BOSS 狂暴化','防禦崩壞!',1.4,'#ff4d6d');
@@ -1057,7 +1333,7 @@ function updateBoss(dt){
   }
   b.fire-=dt;
   if(b.fire<=0){
-    b.fire=Math.max(0.55,1.6-0.13*b.tier)*(b.enraged?0.62:1)*easyGap();   /* 簡易:BOSS 敵彈密度 x0.85 */
+    b.fire=Math.max(0.55,1.6-0.13*b.tier)*(b.enraged?0.62:1)*easyGap();   /* 批次6:密度由難度檔决定(easyGap) */
     bossFire(b);
   }
 }
@@ -1158,18 +1434,24 @@ function buildDroneShots(dt){
   }
 }
 function explodeShot(b){
-  boom(b.x,b.y,b.aoe*0.45,b.c,true,AOE_SHAKE);
+  var pl=(b.kind==='orb');   /* 批次8:電漿=orb。爆炸本身與炸死非 BOSS 敵機都不再推畫面震動 */
+  var bsHit=false;
+  boom(b.x,b.y,b.aoe*0.45,b.c,true,pl?PLASMA_FOE_SHAKE:AOE_SHAKE,1);   /* 批次7:nofl=1 → 電漿/飛彈爆炸不再推全屏白閃 */
+  glowBall(b.x,b.y,b.aoe*GLOW_SHOT,b.c);           /* 改在命中點畫局部光球(顏色跟武器一致) */
   ring(b.x,b.y,4,b.aoe,0.32,b.c,4);
   SFX.boom(0.6);
+  if(pl)shakeMute=1;                               /* 電漿 AOE 波及的小怪/大怪死亡一律不震(含 tank/bomber/splitter) */
   for(var j=0;j<foes.length;j++){
     var f=foes[j];if(f.dead)continue;
     var dx=f.x-b.x,dy=f.y-b.y,rr=b.aoe+f.r;
     if(dx*dx+dy*dy<rr*rr)hitFoe(f,b.dmg*0.85,0);
   }
+  if(pl)shakeMute=0;
   if(boss&&boss.alive){
     var d2=Math.sqrt((boss.x-b.x)*(boss.x-b.x)+(boss.y-b.y)*(boss.y-b.y));
-    if(d2<b.aoe+boss.r)hurtBoss(b.dmg*0.85);
+    if(d2<b.aoe+boss.r){hurtBoss(b.dmg*0.85);bsHit=true;}
   }
+  if(pl&&bsHit)shake=Math.min(26,shake+b.aoe*0.45*AOE_SHAKE);   /* 電漿打到 BOSS:原震動原封不動保留 */
 }
 function hitFoe(f,dmg,kb){
   if(f.dead)return;
@@ -1182,7 +1464,7 @@ function killFoe(f){
   if(f.dead)return;
   f.dead=true;
   score+=f.score;
-  boom(f.x,f.y,f.r,f.color,false,FOE_SHAKE);
+  boom(f.x,f.y,f.r,f.color,false,FOE_SHAKE,((FOES[f.type]?FOES[f.type].r:f.r)<FLASH_MIN_SIZE)?1:0);
   if(f.type==='splitter'){
     for(var i=0;i<2;i++){
       var m=spawnFoe('mini',f.x+(i?20:-20),f.y);
@@ -1281,16 +1563,16 @@ function updateFoes(dt){
     else if(f.type==='shooter'){
       if(f.y<180)f.y+=f.spd*dt*MO_SY;else f.x+=Math.sin(f.t*1.2+f.ph)*70*MO_SX*dt;
       f.fire-=dt;
-      if(f.fire<=0&&f.y>10){f.fire=Math.max(0.9,1.9-wave*0.05)*easyGap();foeShootAimed(f,200+wave*5);}
+      if(f.fire<=0&&f.y>10){f.fire=Math.max(0.9,1.9-wave*0.05)*easyGap()*lateFoe();foeShootAimed(f,(200+wave*5)*DIF().foeSpd);}
     }else if(f.type==='tank'){
       f.y+=f.spd*dt*MO_SY;f.spin+=dt;
       f.fire-=dt;
-      if(f.fire<=0&&f.y>10){f.fire=2.3*easyGap();fanFoe(f,3,Math.PI/2,0.24,190);}
+      if(f.fire<=0&&f.y>10){f.fire=2.3*easyGap()*lateFoe();fanFoe(f,3,Math.PI/2,0.24,190*DIF().foeSpd);}
     }else if(f.type==='bomber'){
       f.vy+=52*dt;f.y+=f.vy*dt*MO_SY;f.x+=Math.sin(f.t*1.5+f.ph)*45*MO_SX*dt;
       f.fire-=dt;
       if(f.fire<=0&&f.y>40&&f.y<H-150){
-        f.fire=1.5*easyGap();
+        f.fire=1.5*easyGap()*lateFoe();
         foeBullet(f.x,f.y+f.r,Math.PI/2,62,9,'#ff7b54');
         tone({f:200,f2:90,t:0,dur:0.12,type:'triangle',vol:0.05});
       }
@@ -1311,7 +1593,7 @@ function updateFoes(dt){
       var dx=f.x-player.x,dy=f.y-player.y,rr=f.r*0.82+MO_HIT_R;   /* 判定用 MO_HIT_R(視覺 r=15 不變) */
       if(dx*dx+dy*dy<rr*rr){
         hurtPlayer();
-        if(f.type!=='tank'){f.dead=true;boom(f.x,f.y,f.r,f.color,true,FOE_SHAKE);}
+        if(f.type!=='tank'){f.dead=true;boom(f.x,f.y,f.r,f.color,true,FOE_SHAKE,((FOES[f.type]?FOES[f.type].r:f.r)<FLASH_MIN_SIZE)?1:0);}
       }
     }
   }
@@ -1319,7 +1601,20 @@ function updateFoes(dt){
 function updateFoeBullets(dt){
   for(var i=foeBullets.length-1;i>=0;i--){
     var b=foeBullets[i];
-    b.t+=dt;b.x+=b.vx*dt;b.y+=b.vy*dt;
+    b.t+=dt;
+    if(b.h){                                  /* 批次5C:追蹤彈只限角速度,到期改直線(可預判甩開) */
+      b.hl-=dt;
+      if(b.hl<=0)b.h=0;
+      else if(player.alive){
+        var hsp=Math.sqrt(b.vx*b.vx+b.vy*b.vy);
+        var ca=Math.atan2(b.vy,b.vx),ta=Math.atan2(player.y-b.y,player.x-b.x),da=ta-ca;
+        while(da>Math.PI)da-=6.2832;while(da<-Math.PI)da+=6.2832;
+        var mx=b.h*dt;
+        if(da>mx)da=mx;else if(da<-mx)da=-mx;
+        ca+=da;b.vx=Math.cos(ca)*hsp;b.vy=Math.sin(ca)*hsp;
+      }
+    }
+    b.x+=b.vx*dt;b.y+=b.vy*dt;
     if(b.t>7||b.x<-40||b.x>W+40||b.y<-60||b.y>H+40){foeBullets.splice(i,1);continue;}
     if(player.alive&&player.inv<=0){
       var dx=player.x-b.x,dy=player.y-b.y,rr=MO_HIT_R+b.r-2;      /* 敵彈判定同樣用 MO_HIT_R(此檔無 BOSS 本體撞擊判定) */
@@ -1331,7 +1626,7 @@ function updateFoeBullets(dt){
 }
 function hurtPlayer(){
   if(player.inv>0||!player.alive)return;
-  player.hp--;player.inv=1.7;
+  player.hp--;player.inv=1.7*DIF().inv;
   moVibe(28);                                   /* 玩家被擊中:短震一次(小怪死亡不震) */
   shake=Math.min(26,shake+15);flash=Math.min(0.6,flash+0.35);
   SFX.hurt();boom(player.x,player.y,10,'#ff6b81',true);
@@ -1355,22 +1650,32 @@ function upCap(k){
   if(k==='drone')return player.up.drone>=DRONE_CAP-SHIPS[shipIdx].drones;
   return false;
 }
+function upWeight(k){
+  /* 批次6:rapid/dmg 的掉落權重隨「已經抽到幾次」和「波數」遞減,後期不再無限疊爆 */
+  var w=upW[k];
+  if(k==='rapid'||k==='dmg'){
+    w*=Math.max(LATE_UP_MIN,1-Math.max(0,wave-12)*LATE_UP);
+    w*=Math.max(0.30,1-((player&&player.up[k])||0)*0.06);
+  }
+  return w;
+}
 function pickUp(){
   var ks=[],tot=0;
-  for(var k in upW){if(upCap(k))continue;ks.push(k);tot+=upW[k];}
+  for(var k in upW){if(upCap(k))continue;ks.push(k);tot+=upWeight(k);}
   if(!ks.length)return null;
   var r=Math.random()*tot;
-  for(var i=0;i<ks.length;i++){r-=upW[ks[i]];if(r<=0)return ks[i];}
+  for(var i=0;i<ks.length;i++){r-=upWeight(ks[i]);if(r<=0)return ks[i];}
   return ks[ks.length-1];
 }
 function drop(x,y,forced){
   var r=Math.random(),type=null,data=null;
   /* forced: 'up'=必定給永久強化;數字=該敵機的掉落率;其他=用一般掉落率 */
   var chance=(forced==='up')?1:(typeof forced==='number'?forced:DROP_CHANCE);
+  if(forced!=='up')chance=Math.min(1,chance*Math.max(LATE_DROP_MIN,1-Math.max(0,wave-12)*LATE_DROP)*DIF().drop);
   if(forced==='up'){type='up';data=dropPool[dropIdx++%dropPool.length];}
   else if(r<chance){
     var r2=Math.random();
-    if(r2<UP_SUB){data=pickUp();if(data){type='up';}else type='hp';}
+    if(r2<Math.min(0.40,UP_SUB*DIF().upSub)){data=pickUp();if(data){type='up';}else type='hp';}
     else if(r2<0.46){type='hp';}
     else{type='ammo';data=AMMO_KEYS[(Math.random()*AMMO_KEYS.length)|0];}
   }
@@ -1651,6 +1956,19 @@ function drawFoes(){
   ctx.globalAlpha=1;
 }
 function bossCol(t){return ['#ff4d6d','#b98cff','#4ef2c0','#ffd166','#ff9f43','#7fe7ff','#ff5470'][(t-1)%7];}
+/* BOSS 施放前的預警:瞄準虛線(畫在 BOSS 之下、敵彈之上) */
+function drawBossAux(){
+  var b=boss;if(!b||b.entering)return;
+  if(b.aim){
+    var L=Math.sqrt((player.x-b.x)*(player.x-b.x)+(player.y-b.y)*(player.y-b.y))+50;
+    ctx.save();
+    ctx.globalAlpha=0.30+0.26*Math.sin(b.t*26);
+    ctx.strokeStyle='#ff5c5c';ctx.lineWidth=2;ctx.setLineDash([9,7]);
+    ctx.beginPath();ctx.moveTo(b.x,b.y+10);
+    ctx.lineTo(b.x+Math.cos(b.aim.a)*L,b.y+10+Math.sin(b.aim.a)*L);ctx.stroke();
+    ctx.setLineDash([]);ctx.restore();
+  }
+}
 function drawBoss(){
   var b=boss;if(!b)return;
   var R=b.r,c=bossCol(b.tier);
@@ -1748,6 +2066,14 @@ function drawFoeBullets(){
   for(var i=0;i<foeBullets.length;i++){
     var b=foeBullets[i];
     var pu=1+0.14*Math.sin(b.t*11);
+    if(b.w){                                  /* 追蹤飛彈:尾焰棒(朝速度反方向),一眼可辨 */
+      var ta=Math.atan2(b.vy,b.vx);
+      ctx.save();ctx.translate(b.x,b.y);ctx.rotate(ta);
+      ctx.fillStyle=hexA(b.c,0.5);
+      ctx.beginPath();ctx.moveTo(-b.r*0.5,0);ctx.lineTo(-b.r*3.1,-b.r*0.55);
+      ctx.lineTo(-b.r*3.1,b.r*0.55);ctx.closePath();ctx.fill();
+      ctx.restore();
+    }
     glow(b.x,b.y,b.r*3*pu,b.c,0.5);
     ctx.fillStyle=b.c;
     ctx.beginPath();ctx.arc(b.x,b.y,b.r*pu,0,6.2832);ctx.fill();
@@ -1841,6 +2167,16 @@ function drawHUD(){
       if(banner.sub)text(banner.sub,W/2,H*0.32+26,15,'#cfe0ff','center','',a);
     }
   }
+  /* 批次5:BOSS 出場前 3 秒 —— 畫面中央紅色大標題閃爍 + 倒數進度條(蓋在 HUD 之上) */
+  if(bossWarn>0){
+    var bwv=bossWarn,bl=(Math.sin(bwv*Math.PI*5)>0)?1:0.22,phv=1-bwv/MO_BOSS_WARN;
+    ctx.globalAlpha=0.10+0.06*bl;ctx.fillStyle='#ff2d55';ctx.fillRect(0,H*0.42,W,150);ctx.globalAlpha=1;
+    ctx.strokeStyle='#ff2d55';ctx.lineWidth=10;ctx.globalAlpha=0.25+0.35*bl;
+    ctx.strokeRect(6,6,W-12,H-12);ctx.globalAlpha=1;ctx.lineWidth=1;
+    text('BOSS',W/2,H*0.42+80,76,'#ff2d55','center','#ff2d55',bl);
+    text('警告:旗艦接近  '+Math.ceil(bwv),W/2,H*0.42+112,18,'#ffd166','center','',bl);
+    ctx.globalAlpha=0.55;ctx.fillStyle='#ff2d55';ctx.fillRect(W*0.2,H*0.42+126,W*0.6*phv,4);ctx.globalAlpha=1;
+  }
   if(player&&player.alive&&player.hp<=1){
     var pl=0.14+0.10*Math.sin(menuT*7);
     ctx.globalAlpha=Math.max(0,pl);
@@ -1909,9 +2245,11 @@ function drawMenu(dt){
   }
   /* 開戰大按鈕 btnStart(240x56)由 drawCtlButtons(true) 繪製;鍵盤 Enter 照樣可用 */
   /* 最佳分數:大字 + 光暈(「畫面尺寸」顯示列已移除;setSize/applySize/sizeW 仍保留給測試) */
-  glow(W/2,748,48,'#ffd166',0.18);
-  text('★ 最佳分數 '+best,W/2,748,21,'#ffd166','center','#ffd166');
-  text('←→/大箭頭 選擇飛船 · 觸控點擊 出 發 · 每 5 波出現 BOSS(強化永久疊加)',W/2,820,13,'#5d708f');
+  /* 批次6:難度三鈕(btnDiff0/1/2,y=712~760)由 drawCtlButtons(true) 繪製;鍵盤 1/2/3 同效果 */
+  text('難度:點選或按 1 / 2 / 3(影響血量 · 彈幕密度 · 掉落)',W/2,784,13,'#8fa6cc');
+  glow(W/2,812,40,'#ffd166',0.18);
+  text('★ 最佳分數 '+best,W/2,812,19,'#ffd166','center','#ffd166');
+  text('←→/大箭頭 選飛船 · Enter/點擊 出 發 · 每 5 波 BOSS',W/2,846,13,'#5d708f');
   text('iPhone 若沒聲音:請關閉側邊靜音開關(或接耳機)',W/2,H-26,MO_TEXT_MIN,'#8fa6cc','center',null,0.8);
   drawCtlButtons(true);
 }
@@ -1969,12 +2307,13 @@ function draw(raw){
     ctx.translate((Math.random()-0.5)*shake,(Math.random()-0.5)*shake);
     ctx.rotate((Math.random()-0.5)*shake*0.0007);
   }
+  drawBullets();                                  /* 任務1:玩家彈(含光暈/拖尾)放到最下層,不再蓋住敵彈與敵人 */
   drawDrops();
   drawRings();
-  drawParts();
+  drawParts();                                    /* 命中火花/爆炸粒子(與敵方爆炸共用 parts,本來就在敵人之下) */
   drawFoeBullets();
-  drawBullets();
   drawFoes();
+  if(boss)drawBossAux();
   if(boss)drawBoss();
   drawDrones();
   drawPlayer();
@@ -2014,12 +2353,15 @@ window.__dbg={
   get:function(){return{state:state,bombs:bombs,score:score,wave:wave,foes:foes.length,bullets:bullets.length,
     foeBullets:foeBullets.length,drops:drops.length,parts:parts.length,drones:drones.length,
     rings:rings.length,bossQ:boss?boss.q.length:0,music:MUS.mode,ship:SHIPS[shipIdx].id,
-    bossKills:bossKills,form:formQ.length,size:sizeIdx,sizeW:SIZES[sizeIdx].w,pauseIdx:pauseIdx,shake:shake,
+    bossKills:bossKills,form:formQ.length,size:sizeIdx,sizeW:SIZES[sizeIdx].w,pauseIdx:pauseIdx,shake:shake,flash:flash,
     caps:{drone:DRONE_CAP,spread:SPREAD_CAP},hpScale:+bossHpScale().toFixed(3),
     tune:{dmgScale:DMG_SCALE,lvlDmg:LVL_DMG,upDmg:UP_DMG,drop:DROP_CHANCE,bigDrop:BIG_DROP_CHANCE,
       upSub:UP_SUB,formChance:FORM_CHANCE,formMin:FORM_MIN,formSize:FORM_SIZE,singleGap:SINGLE_GAP,
-      droneDmg:DRONE_DMG,foeShake:FOE_SHAKE,aoeShake:AOE_SHAKE,waveHp:WAVE_HP,killHp:KILL_HP,musVol:MUS_VOL,
-      bossHp:[BOSS_HP0,BOSS_HP1,BOSS_HP2],hps:[HPS_UP,HPS_LV]},
+      droneDmg:DRONE_DMG,foeShake:FOE_SHAKE,aoeShake:AOE_SHAKE,waveHp:WAVE_HP,killHp:KILL_HP,musVol:MUS_VOL,flashMinSize:FLASH_MIN_SIZE,flashShot:FLASH_SHOT,glowShot:GLOW_SHOT,
+      bossHp:[BOSS_HP0,BOSS_HP1,BOSS_HP2],hps:[HPS_UP,HPS_LV],
+      rapidEff:RAPID_EFF,dmgSoft:DMG_SOFT,dmgSoftMul:DMG_SOFT_MUL,lateFrom:LATE_FROM,lateHp:LATE_HP,
+      lateFire:LATE_FIRE,lateFireMul:LATE_FIRE_MUL,lateDrop:LATE_DROP,lateUp:LATE_UP,
+      lateFoeNow:+lateFoe().toFixed(3),diffIdx:MO_DIFF,diffTable:DIF()},
     mix:{foesSingle:foesSingle,foesForm:foesForm},
     boss:boss?{hp:boss.hp,max:boss.maxhp,tier:boss.tier,enraged:boss.enraged,q:boss.q.length}:null,
     player:player?{hp:player.hp,maxhp:player.maxhp,ammo:player.ammo,lv:player.ammoLvl,up:player.up,
@@ -2039,11 +2381,16 @@ window.__dbg={
   musicTick:musTick,ammoKeys:AMMO_KEYS,ships:SHIPS.length,foesTypes:Object.keys(FOES),
   touchStart:touchStart,touchMove:touchMove,touchEnd:touchEnd,
   fg:moVisibility,
-  setDiff:function(v){MO_EASY=!!v;return MO_EASY;},
+  setDiff:function(v){moDiffSet(v?0:1);return MO_EASY;},   /* 相容舊測試:1=保守,0=中 */
   diff:function(){return MO_EASY;},
+  setDiffIndex:function(i){moDiffSet(i);return MO_DIFF;},
+  diffIndex:function(){return MO_DIFF;},
+  diffName:function(){return MO_DIFF_NAME[MO_DIFF];},
+  diffNames:function(){return MO_DIFF_NAME.slice();},
   mo:function(){return{W:MO_W,H:MO_H,SX:MO_SX,SY:MO_SY,fingerOff:MO_FINGER_OFF,fingerZone:MO_FINGER_ZONE,
     ease:MO_DRAG_EASE,hitR:MO_HIT_R,foeR:MO_FOE_R,textMin:MO_TEXT_MIN,invulnOnResume:MO_INVULN_ON_RESUME,
     wallCells:MO_BOSS_WALL_CELLS,wallGap:(MO_W-50)/MO_BOSS_WALL_CELLS,rowMax:MO_FORM_ROW_MAX,diff:MO_EASY,
+    diffIdx:MO_DIFF,diffName:MO_DIFF_NAME[MO_DIFF],diffNames:MO_DIFF_NAME.slice(),
     caps:{bullets:MO_CAP_BULLETS,foeB:MO_CAP_FOEB}};},
   /* ---- 批次3A:狀態驅動按鈕表(3B 往 moUIBtnsRaw() push 新按鈕,這裡自動涵蓋) ---- */
   uiRects:moUIRects,tapBtn:moTapBtn,
